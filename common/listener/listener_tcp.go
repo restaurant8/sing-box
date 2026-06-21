@@ -98,7 +98,6 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 
 func (l *Listener) loopTCPIn() {
 	tcpListener := l.tcpListener
-	var metadata adapter.InboundContext
 	for {
 		conn, err := tcpListener.Accept()
 		if err != nil {
@@ -114,12 +113,20 @@ func (l *Listener) loopTCPIn() {
 			l.logger.Error("tcp listener closed: ", err)
 			continue
 		}
-		//nolint:staticcheck
-		metadata.InboundDetour = l.listenOptions.Detour
-		metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr()).Unwrap()
-		metadata.OriginDestination = M.SocksaddrFromNet(conn.LocalAddr()).Unwrap()
 		ctx := log.ContextWithNewID(l.ctx)
-		l.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
-		go l.connHandler.NewConnectionEx(ctx, conn, metadata, nil)
+		// Resolve the source address inside the per-connection goroutine. With
+		// Proxy Protocol enabled, conn is a *proxyproto.Conn whose RemoteAddr()
+		// blocks reading the PROXY header; doing that in the accept loop would
+		// serialize and stall ALL incoming connections behind one slow / pre-
+		// opened upstream connection (relays often pre-open and send the header
+		// lazily). Off the accept loop each header read is independent.
+		go func(conn net.Conn) {
+			var metadata adapter.InboundContext
+			metadata.InboundDetour = l.listenOptions.Detour
+			metadata.Source = M.SocksaddrFromNet(conn.RemoteAddr()).Unwrap()
+			metadata.OriginDestination = M.SocksaddrFromNet(conn.LocalAddr()).Unwrap()
+			l.logger.InfoContext(ctx, "inbound connection from ", metadata.Source)
+			l.connHandler.NewConnectionEx(ctx, conn, metadata, nil)
+		}(conn)
 	}
 }
