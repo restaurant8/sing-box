@@ -18,13 +18,10 @@ import (
 	"github.com/sagernet/sing/service"
 
 	"github.com/database64128/tfo-go/v2"
+	"github.com/pires/go-proxyproto"
 )
 
 func (l *Listener) ListenTCP() (net.Listener, error) {
-	//nolint:staticcheck
-	if l.listenOptions.ProxyProtocol || l.listenOptions.ProxyProtocolAcceptNoHeader {
-		return nil, E.New("Proxy Protocol is deprecated and removed in sing-box 1.6.0")
-	}
 	var err error
 	bindAddr := M.SocksaddrFrom(l.listenOptions.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})), l.listenOptions.ListenPort)
 	var listenConfig net.ListenConfig
@@ -73,6 +70,26 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Proxy Protocol (re-added; upstream removed it in 1.6.0). When enabled, wrap
+	// the listener so the real client address from the PROXY v1/v2 header replaces
+	// conn.RemoteAddr() — which is exactly what metadata.Source (and therefore
+	// traffic / online-IP / device-limit tracking) is derived from in loopTCPIn.
+	// AcceptNoHeader gives soga-style compatibility: connections WITHOUT a PROXY
+	// header still pass through using the real TCP address, so one port serves
+	// both proxied (via a relay) and direct clients.
+	if l.listenOptions.ProxyProtocol || l.listenOptions.ProxyProtocolAcceptNoHeader {
+		acceptNoHeader := l.listenOptions.ProxyProtocolAcceptNoHeader
+		tcpListener = &proxyproto.Listener{
+			Listener:          tcpListener,
+			ReadHeaderTimeout: 5 * time.Second,
+			ConnPolicy: func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+				if acceptNoHeader {
+					return proxyproto.USE, nil
+				}
+				return proxyproto.REQUIRE, nil
+			},
+		}
 	}
 	l.logger.Info("tcp server started at ", tcpListener.Addr())
 	l.tcpListener = tcpListener
